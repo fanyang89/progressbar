@@ -1065,6 +1065,16 @@ func (p *ProgressBar) Read(b []byte) (n int, err error) {
 	return
 }
 
+func (p *ProgressBar) ReadAt(buf []byte, off int64) (n int, err error) {
+	_ = off
+	return p.Read(buf)
+}
+
+func (p *ProgressBar) WriteAt(buf []byte, off int64) (n int, err error) {
+	_ = off
+	return p.Write(buf)
+}
+
 func (p *ProgressBar) Close() (err error) {
 	p.Finish()
 	return
