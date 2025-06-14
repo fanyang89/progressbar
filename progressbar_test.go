@@ -2,10 +2,13 @@ package progressbar
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -13,11 +16,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chengxilo/virtualterm"
+
 	"github.com/stretchr/testify/assert"
 )
 
 func TestMain(m *testing.M) {
-	termWidth = func() (int, error) {
+	termWidth = func(w io.Writer) (int, error) {
 		return 0, os.ErrPermission
 	}
 	os.Exit(m.Run())
@@ -93,11 +98,47 @@ func ExampleOptionClearOnFinish() {
 	// Finished
 }
 
+func TestSpinnerClearOnFinish(t *testing.T) {
+	buf := strings.Builder{}
+	bar := NewOptions(-1, OptionSetWidth(100), OptionShowCount(), OptionShowBytes(true), OptionShowIts(), OptionClearOnFinish(), OptionSetWriter(&buf))
+	bar.Reset()
+	time.Sleep(1 * time.Second)
+	bar.Add(10)
+	time.Sleep(1 * time.Second)
+	bar.Finish()
+	result, _ := virtualterm.Process(buf.String())
+	expect := "                                "
+	if result != expect {
+		t.Errorf("Render miss-match\nResult: '%s'\nExpect: '%s'\n%+v", result, expect, bar)
+	}
+}
+
 func ExampleProgressBar_Finish() {
-	bar := NewOptions(100, OptionSetWidth(10))
+	bar := NewOptions(100, OptionSetWidth(10), OptionShowCount(), OptionShowBytes(true), OptionShowIts())
+	bar.Reset()
+	time.Sleep(1 * time.Second)
 	bar.Finish()
 	// Output:
-	// 100% |██████████|
+	// 100% |██████████| (100/100 B, 100 B/s, 100 it/s)
+}
+
+func TestSpinnerFinish(t *testing.T) {
+	buf := strings.Builder{}
+	bar := NewOptions(-1, OptionSetWidth(100), OptionShowCount(), OptionShowBytes(true), OptionShowIts(), OptionSetWriter(&buf))
+	bar.Reset()
+	time.Sleep(1 * time.Second)
+	bar.Add(10)
+	time.Sleep(1 * time.Second)
+	bar.Finish()
+	result, err := virtualterm.Process(buf.String())
+	if err != nil {
+		t.Error(err)
+	}
+	// the "\r \r"
+	expect := "|  (10 B,  5 B/s, 5 it/s) [2s]  "
+	if result != expect {
+		t.Errorf("Render miss-match\nResult: '%s'\nExpect: '%s'\n%+v", result, expect, bar)
+	}
 }
 
 func Example_xOutOfY() {
@@ -173,19 +214,35 @@ func ExampleProgressBar_ChangeMax() {
 	// 100% |██████████|
 }
 
+func ExampleProgressBar_AddMax() {
+	bar := NewOptions(50, OptionSetWidth(10), OptionSetPredictTime(false))
+	bar.AddMax(50)
+	bar.Add(100)
+	// Output:
+	// 100% |██████████|
+}
+
 func ExampleOptionShowIts_spinner() {
 	/*
 		Spinner test with iteration count and iteration rate
 	*/
+	vt := virtualterm.NewDefault()
 	bar := NewOptions(-1,
 		OptionSetWidth(10),
 		OptionShowIts(),
 		OptionShowCount(),
+		OptionSetWriter(&vt),
 	)
 	bar.Reset()
 	time.Sleep(1 * time.Second)
 	bar.Add(5)
-
+	bar.lock.Lock()
+	s, err := vt.String()
+	bar.lock.Unlock()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Print(s)
 	// Output:
 	// -  (5/-, 5 it/s) [1s]
 }
@@ -282,9 +339,11 @@ func ExampleOptionShowBytes_spinner() {
 	/*
 		Spinner test with iterations and count
 	*/
+	buf := strings.Builder{}
 	bar := NewOptions(-1,
 		OptionSetWidth(10),
 		OptionShowBytes(true),
+		OptionSetWriter(&buf),
 	)
 
 	bar.Reset()
@@ -292,7 +351,10 @@ func ExampleOptionShowBytes_spinner() {
 	// since 10 is the width and we don't know the max bytes
 	// it will do a infinite scrolling.
 	bar.Add(11)
-
+	bar.lock.Lock()
+	result, _ := virtualterm.Process(buf.String())
+	bar.lock.Unlock()
+	fmt.Print(result)
 	// Output:
 	// -  (11 B/s) [1s]
 }
@@ -338,6 +400,7 @@ func TestBarSmallBytes(t *testing.T) {
 func TestBarFastBytes(t *testing.T) {
 	buf := strings.Builder{}
 	bar := NewOptions64(1e8, OptionShowBytes(true), OptionShowCount(), OptionSetWidth(10), OptionSetWriter(&buf))
+	bar.StartWithoutRender()
 	time.Sleep(time.Millisecond)
 	bar.Add(1e7)
 	if !strings.Contains(buf.String(), " GB/s)") {
@@ -400,14 +463,67 @@ func TestOptionSetTheme(t *testing.T) {
 	buf := strings.Builder{}
 	bar := NewOptions(
 		10,
-		OptionSetTheme(Theme{Saucer: "#", SaucerPadding: "-", BarStart: ">", BarEnd: "<"}),
+		OptionSetTheme(
+			Theme{Saucer: "#", SaucerPadding: "-",
+				BarStart: ">", BarEnd: "<"}),
 		OptionSetWidth(10),
 		OptionSetWriter(&buf),
 	)
-	bar.Add(5)
+	bar.RenderBlank()
 	result := strings.TrimSpace(buf.String())
-	expect := "50% >#####-----<  [0s:0s]"
+	expect := "0% >----------<"
+	if !strings.Contains(result, expect) {
+		t.Errorf("Render miss-match\nResult: '%s'\nExpect: '%s'\n%+v", result, expect, bar)
+	}
+	buf.Reset()
+
+	bar.Add(5)
+	result = strings.TrimSpace(buf.String())
+	expect = "50% >#####-----<  [0s:0s]"
 	if result != expect {
+		t.Errorf("Render miss-match\nResult: '%s'\nExpect: '%s'\n%+v", result, expect, bar)
+	}
+	buf.Reset()
+
+	bar.Finish()
+	result = strings.TrimSpace(buf.String())
+	expect = "100% >##########<"
+	if !strings.Contains(result, expect) {
+		t.Errorf("Render miss-match\nResult: '%s'\nExpect: '%s'\n%+v", result, expect, bar)
+	}
+}
+
+func TestOptionSetThemeFilled(t *testing.T) {
+	buf := strings.Builder{}
+	bar := NewOptions(
+		10,
+		OptionSetTheme(
+			Theme{Saucer: "#", SaucerPadding: "-",
+				BarStart: ">", BarStartFilled: "]",
+				BarEnd: "<", BarEndFilled: "["}),
+		OptionSetWidth(10),
+		OptionSetWriter(&buf),
+	)
+	bar.RenderBlank()
+	result := strings.TrimSpace(buf.String())
+	expect := "0% >----------<"
+	if !strings.Contains(result, expect) {
+		t.Errorf("Render miss-match\nResult: '%s'\nExpect: '%s'\n%+v", result, expect, bar)
+	}
+	buf.Reset()
+
+	bar.Add(5)
+	result = strings.TrimSpace(buf.String())
+	expect = "50% ]#####-----<  [0s:0s]"
+	if result != expect {
+		t.Errorf("Render miss-match\nResult: '%s'\nExpect: '%s'\n%+v", result, expect, bar)
+	}
+	buf.Reset()
+
+	bar.Finish()
+	result = strings.TrimSpace(buf.String())
+	expect = "100% ]##########["
+	if !strings.Contains(result, expect) {
 		t.Errorf("Render miss-match\nResult: '%s'\nExpect: '%s'\n%+v", result, expect, bar)
 	}
 }
@@ -457,8 +573,45 @@ func TestOptionSetElapsedTime_spinner(t *testing.T) {
 	bar.Reset()
 	time.Sleep(1 * time.Second)
 	bar.Add(5)
-	result := strings.TrimSpace(buf.String())
+	bar.lock.Lock()
+	result, err := virtualterm.Process(buf.String())
+	bar.lock.Unlock()
+	result = strings.TrimSpace(result)
+	if err != nil {
+		t.Fatal(err)
+	}
 	expect := "-  (5/-, 5 it/s)"
+	if result != expect {
+		t.Errorf("Render miss-match\nResult: '%s'\nExpect: '%s'\n%+v", result, expect, bar)
+	}
+}
+
+func TestOptionSetElapsedTime(t *testing.T) {
+	buf := strings.Builder{}
+	bar := NewOptions(
+		10,
+		OptionSetElapsedTime(false),
+		OptionSetPredictTime(false),
+		OptionSetWidth(10),
+		OptionSetWriter(&buf),
+	)
+
+	_ = bar.Add(2)
+	result := strings.TrimSpace(buf.String())
+	expect := "20% |██        |"
+
+	if result != expect {
+		t.Errorf("Render miss-match\nResult: '%s'\nExpect: '%s'\n%+v", result, expect, bar)
+	}
+
+	bar.Reset()
+	bar.config.elapsedTime = true
+	buf.Reset()
+
+	_ = bar.Add(7)
+	result = strings.TrimSpace(buf.String())
+	expect = "70% |███████   |  [0s]"
+
 	if result != expect {
 		t.Errorf("Render miss-match\nResult: '%s'\nExpect: '%s'\n%+v", result, expect, bar)
 	}
@@ -491,6 +644,12 @@ func TestSpinnerState(t *testing.T) {
 	bar.Add(10)
 
 	state := bar.State()
+	if state.Max != -1 {
+		t.Errorf("Max mismatched gotMax %d wantMax %d", state.Max, -1)
+	}
+	if state.CurrentNum != 10 {
+		t.Errorf("Number mismatched gotNum %d wantNum %d", state.CurrentNum, 10)
+	}
 	if state.CurrentBytes != 10.0 {
 		t.Errorf("Number of bytes mismatched gotBytes %f wantBytes %f", state.CurrentBytes, 10.0)
 	}
@@ -733,9 +892,9 @@ func TestOptionFullWidth(t *testing.T) {
 		{ // 4
 			[]Option{OptionSetPredictTime(false)},
 			"" +
-				"\r  10% |██████                                                          |  " +
-				"\r                                                                          \r" +
-				"\r 100% |████████████████████████████████████████████████████████████████|  ",
+				"\r  10% |██████                                                               |  " +
+				"\r                                                                               \r" +
+				"\r 100% |█████████████████████████████████████████████████████████████████████|  ",
 		},
 		{ // 5
 			[]Option{OptionSetPredictTime(false), OptionShowElapsedTimeOnFinish()},
@@ -789,9 +948,9 @@ func TestOptionFullWidth(t *testing.T) {
 		{ // 12
 			[]Option{OptionShowIts(), OptionShowCount(), OptionSetPredictTime(false)},
 			"" +
-				"\r  10% |████                                           | (10/100, 10 it/s) " +
-				"\r                                                                          \r" +
-				"\r 100% |██████████████████████████████████████████████| (100/100, 50 it/s) ",
+				"\r  10% |█████                                               | (10/100, 10 it/s) " +
+				"\r                                                                               \r" +
+				"\r 100% |███████████████████████████████████████████████████| (100/100, 50 it/s) ",
 		},
 		{ // 13
 			[]Option{OptionShowIts(), OptionShowCount(), OptionSetPredictTime(false), OptionShowElapsedTimeOnFinish()},
@@ -815,6 +974,7 @@ func TestOptionFullWidth(t *testing.T) {
 			t.Parallel()
 			buf := strings.Builder{}
 			bar := NewOptions(100, append(test.opts, []Option{OptionFullWidth(), OptionSetWriter(&buf)}...)...)
+			bar.StartWithoutRender()
 			time.Sleep(1 * time.Second)
 			bar.Add(10)
 			time.Sleep(1 * time.Second)
@@ -838,4 +998,184 @@ func TestHumanizeBytesIEC(t *testing.T) {
 
 	amount, suffix = humanizeBytes(float64(56.78)*1024*1024*1024, true)
 	assert.Equal(t, "57 GiB", fmt.Sprintf("%s%s", amount, suffix))
+}
+
+func TestProgressBar_StartWithoutRender(t *testing.T) {
+	buf := strings.Builder{}
+	bar := NewOptions(100, OptionSetWriter(&buf))
+	time.Sleep(1 * time.Second)
+	bar.StartWithoutRender()
+	time.Sleep(1 * time.Second)
+	bar.Add(10)
+	result := strings.TrimSpace(buf.String())
+	expect := "10% |████                                    |  [1s:9s]"
+	if result != expect {
+		t.Errorf("Render miss-match\nResult: '%s'\nExpect: '%s'\n%+v", result, expect, bar)
+	}
+}
+
+func TestOptionSetSpinnerChangeInterval(t *testing.T) {
+	interval := 1000 * time.Millisecond
+	vt := virtualterm.NewDefault()
+	actuals := make([]string, 0, 8)
+	expecteds := []string{
+		"◐ test  [0s]",
+		"◓ test  [1s]",
+		"◑ test  [2s]",
+		"◒ test  [3s]",
+		"◐ test  [4s]",
+		"◓ test  [5s]",
+		"◑ test  [6s]",
+		"◒ test  [7s]",
+	}
+	bar := NewOptions(-1,
+		OptionSetDescription("test"),
+		OptionSpinnerType(7),
+		OptionSetWriter(&vt),
+		OptionSetSpinnerChangeInterval(interval))
+	bar.Add(1)
+	for i := 0; i < 8; i++ {
+		bar.lock.Lock()
+		s, _ := vt.String()
+		bar.lock.Unlock()
+		s = strings.TrimSpace(s)
+		actuals = append(actuals, s)
+		// sleep 50 ms more to make sure to go to next interval each time
+		time.Sleep(1050 * time.Millisecond)
+	}
+	for i := range actuals {
+		assert.Equal(t, expecteds[i], actuals[i])
+	}
+}
+
+func TestOptionSetSpinnerChangeIntervalZero(t *testing.T) {
+	vt := virtualterm.NewDefault()
+	bar := NewOptions(-1,
+		OptionSetDescription("test"),
+		OptionSpinnerType(7),
+		OptionSetWriter(&vt),
+		OptionSetSpinnerChangeInterval(0))
+	actuals := make([]string, 0, 5)
+	expected := []string{
+		"◐ test  [0s]",
+		"◓ test  [1s]",
+		"◑ test  [2s]",
+		"◒ test  [3s]",
+		"◐ test  [4s]",
+	}
+	for i := 0; i < 5; i++ {
+		bar.Add(1)
+		bar.lock.Lock()
+		s, _ := vt.String()
+		bar.lock.Unlock()
+		_ = strings.TrimSpace(s)
+	}
+	for i := range actuals {
+		assert.Equal(t, expected[i], actuals[i])
+	}
+}
+
+func TestOptionShowTotalFalseDeterminate(t *testing.T) {
+	buf := strings.Builder{}
+	bar := NewOptions64(
+		100000000,
+		OptionShowBytes(true),
+		OptionShowCount(),
+		OptionSetWidth(10),
+		OptionShowTotalBytes(false),
+		OptionSetWriter(&buf),
+	)
+
+	bar.Add(10000)
+	if !strings.Contains(buf.String(), "10 kB, ") {
+		t.Errorf("wrong string: %s", buf.String())
+	}
+}
+
+func TestOptionShowTotalFalseIndeterminate(t *testing.T) {
+	buf := strings.Builder{}
+	bar := NewOptions(-1,
+		OptionSetWidth(10),
+		OptionSetDescription("indeterminate spinner"),
+		OptionShowIts(),
+		OptionShowCount(),
+		OptionSpinnerType(9),
+		OptionShowTotalBytes(false),
+		OptionSetWriter(&buf),
+	)
+	bar.Add(10)
+	if !strings.Contains(buf.String(), "10, ") {
+		t.Errorf("wrong string: %s", buf.String())
+	}
+}
+
+func TestOptionShowTotalTrueIndeterminate(t *testing.T) {
+	buf := strings.Builder{}
+	bar := NewOptions(-1,
+		OptionSetWidth(10),
+		OptionSetDescription("indeterminate spinner"),
+		OptionShowIts(),
+		OptionShowCount(),
+		OptionSpinnerType(9),
+		OptionShowTotalBytes(true),
+		OptionSetWriter(&buf),
+	)
+	bar.Add(10)
+	if !strings.Contains(buf.String(), "10/-, ") {
+		t.Errorf("wrong string: %s", buf.String())
+	}
+}
+
+func TestStartHTTPServer(t *testing.T) {
+	bar := Default(10, "test")
+	bar.Add(1)
+
+	hostPort := "localhost:9696"
+	svr := bar.StartHTTPServer(hostPort)
+
+	// check plain text
+	resp, err := http.Get(fmt.Sprintf("http://%s/desc", hostPort))
+	if err != nil {
+		t.Error(err)
+	}
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Error(err)
+	}
+	if string(got) != "1/10, 10.00%, 0s left" {
+		t.Errorf("wrong string: %s", string(got))
+	}
+
+	// check json
+	resp, err = http.Get(fmt.Sprintf("http://%s/state", hostPort))
+	if err != nil {
+		t.Error(err)
+	}
+	got, err = io.ReadAll(resp.Body)
+	if err != nil {
+		t.Error(err)
+	}
+	var result State
+	err = json.Unmarshal(got, &result)
+	if err != nil {
+		t.Error(err)
+	}
+	if result.Max != bar.State().Max || result.CurrentNum != bar.State().CurrentNum {
+		t.Errorf("wrong state: %v", result)
+	}
+
+	// shutdown server
+	err = svr.Shutdown(context.Background())
+	if err != nil {
+		t.Errorf("shutdown server failed: %v", err)
+	}
+
+	// start new bar server
+	bar = Default(10, "test")
+	bar.Add(1)
+	svr = bar.StartHTTPServer(hostPort)
+	err = svr.Close()
+	if err != nil {
+		t.Errorf("shutdown server failed: %v", err)
+	}
 }
